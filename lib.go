@@ -1,4 +1,4 @@
-package main
+package usps
 
 import (
 	"bytes"
@@ -29,12 +29,16 @@ func Init() {
 }
 
 var tmp = `https://secure.shippingapis.com/ShippingAPI.dll?API=Verify&XML=`
-var xmlv = `<AddressValidateRequest USERID="{{ .User }}"><Revision>1</Revision><Address ID="0"><Address1>{{ .Address1  }}</Address1><Address2>{{ .Address2 }}</Address2><City>{{ .City }}</City><State>{{ .State }}</State><Zip5>{{ .Zip }}</Zip5><Zip4>{{ .Zip_ext }}</Zip4></Address></AddressValidateRequest>`
+var xmlv = `<AddressValidateRequest USERID="{{ .User }}"><Revision>1</Revision>
+{{ range .Address }}
+<Address ID="{{.ID}}"><Address1>{{ .Address1  }}</Address1><Address2>{{ .Address2 }}</Address2><City>{{ .City }}</City><State>{{ .State }}</State><Zip5>{{ .Zip }}</Zip5><Zip4>{{ .Zip_ext }}</Zip4></Address>
+{{end}}
+</AddressValidateRequest>`
 
 type AddressValidateResponse struct {
 	XMLName xml.Name `xml:"AddressValidateResponse"`
 	Text    string   `xml:",chardata"`
-	Address struct {
+	Address []struct {
 		Text                 string `xml:",chardata"`
 		ID                   string `xml:"ID,attr"`
 		Address1             string `xml:"Address1"`
@@ -59,44 +63,62 @@ func (ax *AddressValidateResponse) FromXml(data []byte) error {
 	return xml.Unmarshal(data, ax)
 }
 func (ax *AddressValidateResponse) ToJson() ([]byte, error) {
-	a := &ax.Address
-	return json.Marshal(&Address{
-		Address1:        a.Address2,
-		Address2:        a.Address1,
-		City:            a.City,
-		State:           a.State,
-		Zip:             a.Zip5,
-		Zip_ext:         a.Zip4,
-		DPVConfirmation: a.DPVConfirmation,
-	})
+	al := []*Address{}
+	for _, a := range ax.Address {
+		al = append(al, &Address{
+			ID:              a.ID,
+			Address1:        a.Address2,
+			Address2:        a.Address1,
+			City:            a.City,
+			State:           a.State,
+			Zip:             a.Zip5,
+			Zip_ext:         a.Zip4,
+			DPVConfirmation: a.DPVConfirmation,
+		})
+	}
+	return json.Marshal(al)
 }
 
 type Address struct {
-	User            string
+	ID              string `json:"ID,omitempty"`
 	Address1        string `json:"Address1,omitempty"`
 	Address2        string `json:"Address2,omitempty"`
 	City            string `json:"City,omitempty"`
 	State           string `json:"State,omitempty"`
 	Zip             string `json:"Zip5,omitempty"`
 	Zip_ext         string `json:"Zip4,omitempty"`
-	DPVConfirmation string `xml:"DPVConfirmation"`
+	DPVConfirmation string `json:"DPVConfirmation,omitempty"`
+}
+type AddressList struct {
+	User    string
+	Address []*Address `json:"Address,omitempty"`
 }
 
-func (a *Address) FromJson(data []byte) error {
-	return json.Unmarshal(data, a)
-}
-func (a *Address) Validate() ([]byte, error) {
+func (a *AddressList) ToXml() (string, error) {
+	a.User = ApiKey
 	t, err := template.New("todos").Parse(
 		xmlv)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	buf := new(bytes.Buffer)
 	err = t.Execute(buf, a)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	res, err := http.Get(tmp + url.QueryEscape(buf.String()))
+	return buf.String(), nil
+}
+
+func (a *AddressList) Validate() ([]byte, error) {
+	x, e := a.ToXml()
+	if e != nil {
+		return nil, e
+	}
+	return a.ValidateXml(x)
+}
+func (a *AddressList) ValidateXml(x string) ([]byte, error) {
+
+	res, err := http.Get(tmp + url.QueryEscape(x))
 	if err != nil {
 		return nil, err
 	}
@@ -104,13 +126,47 @@ func (a *Address) Validate() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-
+	log.Printf("query: %s\n response: %s\n", x, string(b))
 	return b, nil
 }
-func ValidateJson(s []byte) ([]byte, error) {
-	var ad Address
+
+func ValidateJson(b []byte) ([]byte, error) {
+	var address = &AddressList{}
+	e := json.Unmarshal(b, &address.Address)
+	if e != nil || len(address.Address) == 0 {
+		log.Printf("0 %v,%s", e, string(b))
+		return nil, e
+	}
+	x, e := address.ToXml()
+	if e != nil {
+		log.Printf("1b %v", e)
+	}
+	r1, e := address.ValidateXml(string(x))
+	if e != nil {
+		log.Printf("2 %v,%s", e, x)
+		return nil, e
+	}
+
+	var ar = &AddressValidateResponse{}
+	e = ar.FromXml(r1)
+	if e != nil {
+		log.Printf("3 %v,%v,%s", e, r1, x)
+		return nil, e
+	}
+	tj, e := ar.ToJson()
+	if e != nil {
+		log.Printf("4 %v", e)
+		return nil, e
+	}
+	return tj, nil
+
+}
+
+/*
+
+	var ad AddressList
 	var ar AddressValidateResponse
-	e := ad.FromJson(s)
+	e := json.Unmarshal(s,&ad)
 	if e != nil {
 		return nil, e
 	}
@@ -126,4 +182,4 @@ func ValidateJson(s []byte) ([]byte, error) {
 	}
 
 	return ar.ToJson()
-}
+*/
